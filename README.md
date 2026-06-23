@@ -3,11 +3,11 @@
 
 
 <p align="center">
-  <a href="https://github.com/STTGL-01/Veeam_Stale_Restore_Point_Report">
+  <a href="https://github.com/STTGL-01/Stale_Restore_Point_Locator_for_Veeam_Backups">
     <strong>Download Latest Release</strong>
   </a>
   ·
-  <a href="https://github.com/STTGL-01/Veeam_Stale_Restore_Point_Report">
+  <a href="https://github.com/STTGL-01/Stale_Restore_Point_Locator_for_Veeam_Backups">
     <strong>Report an Issue</strong>
   </a>
 </p>
