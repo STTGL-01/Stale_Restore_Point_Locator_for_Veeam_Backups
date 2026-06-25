@@ -220,13 +220,61 @@ function Get-RestorePointChains {
     return $chainsArray
 }
 
+# ✅ Helper to build a "latest chain details" object from a chain
+function Build-LatestChainDetails {
+    param($Chain)
+
+    if (-not $Chain) { return $null }
+
+    $latestPointDetails = New-Object System.Collections.Generic.List[object]
+    foreach ($p in ($Chain.Points | Sort-Object CreationTime)) {
+        $rpName = ''
+        try { $rpName = $p.Name } catch { }
+        if ($rpName -eq '') {
+            try { $rpName = $p.VmName } catch { }
+        }
+        if ($rpName -eq '') { $rpName = '<no-name>' }
+
+        $rpType = if (Test-IsFullRestorePoint -Rp $p) { 'Full' } else { 'Increment' }
+
+        $rpId = ''
+        try { $rpId = "$($p.Id)" } catch { }
+
+        $rpTime = $null
+        try { $rpTime = $p.CreationTime } catch { }
+
+        $latestPointDetails.Add([pscustomobject]@{
+            ObjectName       = $rpName
+            RestorePointTime = $rpTime
+            RestorePointType = $rpType
+            RestorePointId   = $rpId
+        }) | Out-Null
+    }
+
+    $latestFullCount = 0
+    $latestIncCount  = 0
+    foreach ($p in $Chain.Points) {
+        if (Test-IsFullRestorePoint -Rp $p) { $latestFullCount++ } else { $latestIncCount++ }
+    }
+
+    return [pscustomobject]@{
+        ChainStart       = $Chain.ChainStart
+        ChainEnd         = $Chain.ChainEnd
+        FullCount        = $latestFullCount
+        IncrementCount   = $latestIncCount
+        TotalChainPoints = $Chain.Points.Count
+        PointDetails     = $latestPointDetails
+    }
+}
+
 # ------------------------------------------------------------
 # Collect Backup Copy chains
 # ------------------------------------------------------------
 
-$results             = New-Object System.Collections.Generic.List[object]
-$encryptedBackups    = New-Object System.Collections.Generic.List[object]
-$inaccessibleBackups = New-Object System.Collections.Generic.List[object]
+$results              = New-Object System.Collections.Generic.List[object]
+$ineligibleOnlyRows   = New-Object System.Collections.Generic.List[object]   # ✅ ineligible chains without eligible counterparts
+$encryptedBackups     = New-Object System.Collections.Generic.List[object]
+$inaccessibleBackups  = New-Object System.Collections.Generic.List[object]
 
 $copyBackups = @(Get-VBRBackup | Where-Object {
     ($_.TypeToString -match 'Backup Copy') -or
@@ -292,6 +340,31 @@ if ($copyBackups.Count -gt 0) {
 
             Write-ReportLog "  Object: $($g.Name) | $($chains.Count) chain(s) detected"
 
+            # ✅ Capture latest chain details for later display
+            $latestChainObj     = $chains | Where-Object { $_.IsLatestChain } | Select-Object -First 1
+            $latestChainDetails = Build-LatestChainDetails -Chain $latestChainObj
+
+            # Object-level metadata that we'll reuse across rows
+            $objectName = ''
+            $sampleRp = $g.Group | Select-Object -First 1
+            if ($sampleRp) {
+                try { $objectName = $sampleRp.Name } catch { }
+                if ($objectName -eq '') {
+                    try { $objectName = $sampleRp.VmName } catch { }
+                }
+            }
+            if ($objectName -eq '') { $objectName = '<no-name>' }
+
+            $objIdStr = ''
+            if ($latestChainObj) {
+                try { $objIdStr = "$($latestChainObj.FullPoint.ObjectId)" } catch { }
+            }
+            if ($objIdStr -eq '' -and $sampleRp) {
+                try { $objIdStr = "$($sampleRp.ObjectId)" } catch { }
+            }
+
+            $eligibleChainAdded = $false
+
             $chainIndex = 0
             foreach ($chain in $chains) {
 
@@ -322,10 +395,10 @@ if ($copyBackups.Count -gt 0) {
                     if (Test-IsFullRestorePoint -Rp $p) { $fullCount++ } else { $incCount++ }
                 }
 
-                $objIdStr = ''
-                try { $objIdStr = "$($chain.FullPoint.ObjectId)" } catch { }
+                $chainObjId = ''
+                try { $chainObjId = "$($chain.FullPoint.ObjectId)" } catch { }
 
-                # Store the chain row plus the underlying point details
+                # Store the eligible chain's underlying point details
                 $pointDetails = New-Object System.Collections.Generic.List[object]
                 foreach ($p in ($chain.Points | Sort-Object CreationTime)) {
                     $rpName = ''
@@ -352,24 +425,48 @@ if ($copyBackups.Count -gt 0) {
                 }
 
                 $results.Add([pscustomobject]@{
-                    ObjectName       = $nameVal
-                    CopyJobName      = $backup.JobName
-                    SourceJobName    = $sourceJob
-                    BackupName       = $backup.Name
-                    BackupType       = $rawType
-                    Platform         = $rawPlatform
-                    Repository       = $repoInfo.Name
-                    RepositoryType   = $repoInfo.Type
-                    ChainNumber      = $chainIndex
-                    ChainStart       = $chain.ChainStart
-                    ChainEnd         = $chain.ChainEnd
-                    FullCount        = $fullCount
-                    IncrementCount   = $incCount
-                    TotalChainPoints = $chain.Points.Count
-                    ChainsForObject  = $chains.Count
-                    ObjectId         = $objIdStr
-                    PointDetails     = $pointDetails
+                    ObjectName         = $nameVal
+                    CopyJobName        = $backup.JobName
+                    SourceJobName      = $sourceJob
+                    BackupName         = $backup.Name
+                    BackupType         = $rawType
+                    Platform           = $rawPlatform
+                    Repository         = $repoInfo.Name
+                    RepositoryType     = $repoInfo.Type
+                    ChainNumber        = $chainIndex
+                    ChainStart         = $chain.ChainStart
+                    ChainEnd           = $chain.ChainEnd
+                    FullCount          = $fullCount
+                    IncrementCount     = $incCount
+                    TotalChainPoints   = $chain.Points.Count
+                    ChainsForObject    = $chains.Count
+                    ObjectId           = $chainObjId
+                    PointDetails       = $pointDetails
+                    LatestChainDetails = $latestChainDetails
                 }) | Out-Null
+
+                $eligibleChainAdded = $true
+            }
+
+            # ✅ If this object had no eligible chains but does have a latest chain,
+            # record an "ineligible-only" row so the user can still view it.
+            if (-not $eligibleChainAdded -and $latestChainDetails) {
+
+                $ineligibleOnlyRows.Add([pscustomobject]@{
+                    ObjectName         = $objectName
+                    CopyJobName        = $backup.JobName
+                    SourceJobName      = $sourceJob
+                    BackupName         = $backup.Name
+                    BackupType         = $rawType
+                    Platform           = $rawPlatform
+                    Repository         = $repoInfo.Name
+                    RepositoryType     = $repoInfo.Type
+                    ChainsForObject    = $chains.Count
+                    ObjectId           = $objIdStr
+                    LatestChainDetails = $latestChainDetails
+                }) | Out-Null
+
+                Write-ReportLog "    Object had no eligible chains - recorded ineligible-only row"
             }
         }
     }
@@ -380,9 +477,9 @@ if ($copyBackups.Count -gt 0) {
 # ------------------------------------------------------------
 
 Write-Host ""
-Write-Host "=====================================================" -ForegroundColor Cyan
-Write-Host "   Eligible Stale Restore Points - Backup Copy Report" -ForegroundColor Cyan
-Write-Host "=====================================================" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "   Stale Restore Points - Backup Copy Report" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
 if ($copyBackups.Count -eq 0) {
@@ -396,10 +493,13 @@ if ($copyBackups.Count -eq 0) {
     return
 }
 
-if ($results.Count -eq 0) {
+# ✅ New behavior: if no eligible chains exist but we have ineligible-only rows,
+# still let the user select them to view the current chain.
+if ($results.Count -eq 0 -and $ineligibleOnlyRows.Count -eq 0) {
 
-    Write-Host "Backup Copy jobs exist, but no eligible orphaned chains were found before the cutoff." -ForegroundColor Green
-    Write-ReportLog "RESULT: no eligible chains"
+
+    Write-Host "Backup Copy jobs exist, but no eligible stale chains were found before the cutoff." -ForegroundColor Green
+    Write-ReportLog "RESULT: no eligible chains and no ineligible-only rows"
 
     if ($encryptedBackups.Count -gt 0) {
         Write-Host ""
@@ -432,8 +532,18 @@ while ($true) {
     $cleanupMap = @{}
     $rowNum = 1
 
-    $displayRows = foreach ($r in ($results | Sort-Object ChainStart, ObjectName)) {
+    # Combine eligible rows + ineligible-only rows for selection
+    $combinedRows = @()
+    foreach ($r in ($results            | Sort-Object ChainStart, ObjectName)) { $combinedRows += $r }
+    foreach ($r in ($ineligibleOnlyRows | Sort-Object ObjectName))             { $combinedRows += $r }
+
+    $displayRows = foreach ($r in $combinedRows) {
         $cleanupMap["$rowNum"] = $r
+
+        $hasEligible    = $r.PSObject.Properties['PointDetails']  -and $r.PointDetails
+        $eligibleLabel  = if ($hasEligible) { "$($r.TotalChainPoints) ($($r.FullCount)F + $($r.IncrementCount)I)" } else { 'None' }
+        $chainStartCol  = if ($hasEligible) { $r.ChainStart } else { '<no eligible chains>' }
+        $chainEndCol    = if ($hasEligible) { $r.ChainEnd }   else { '<no eligible chains>' }
 
         [pscustomobject]@{
             Row              = $rowNum
@@ -441,9 +551,9 @@ while ($true) {
             BackupType       = $r.BackupType
             Repository       = $r.Repository
             CopyJobName      = $r.CopyJobName
-            ChainStart       = $r.ChainStart
-            ChainEnd         = $r.ChainEnd
-            Points           = "$($r.TotalChainPoints) ($($r.FullCount)F + $($r.IncrementCount)I)"
+            ChainStart       = $chainStartCol
+            ChainEnd         = $chainEndCol
+            EligiblePoints   = $eligibleLabel
             ChainsForObject  = $r.ChainsForObject
         }
 
@@ -477,6 +587,8 @@ while ($true) {
 
     $target = $cleanupMap[$selection]
 
+    $hasEligible = $target.PSObject.Properties['PointDetails'] -and $target.PointDetails
+
     Write-Host ""
     Write-Host "Chain details:" -ForegroundColor Cyan
     Write-Host "  ObjectName       : $($target.ObjectName)"
@@ -486,13 +598,21 @@ while ($true) {
     Write-Host "  SourceJobName    : $($target.SourceJobName)"
     Write-Host "  BackupName       : $($target.BackupName)"
     Write-Host "  Repository       : $($target.Repository)"
-    Write-Host "  ChainStart       : $($target.ChainStart)"
-    Write-Host "  ChainEnd         : $($target.ChainEnd)"
-    Write-Host "  Total Chain Pts  : $($target.TotalChainPoints) ($($target.FullCount) Full + $($target.IncrementCount) Increment)"
+
+    if ($hasEligible) {
+        Write-Host "  ChainStart       : $($target.ChainStart)"
+        Write-Host "  ChainEnd         : $($target.ChainEnd)"
+        Write-Host "  Total Chain Pts  : $($target.TotalChainPoints) ($($target.FullCount) Full + $($target.IncrementCount) Increment)"
+    }
+
     Write-Host "  Chains for Obj   : $($target.ChainsForObject)"
 
-    Write-Host ""
-    Write-Host "Eligible restore points in this chain:" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "--------------------------------------" -ForegroundColor Cyan
+Write-Host "Eligible restore points in this chain:" -ForegroundColor Cyan
+Write-Host "--------------------------------------" -ForegroundColor Cyan
+
+if ($hasEligible) {
 
     $pointsTable = $target.PointDetails |
         Sort-Object RestorePointTime |
@@ -501,17 +621,44 @@ while ($true) {
 
     Write-Host $pointsTable
 
+} else {
+
+    # ✅ One blank line above the notice, three blank lines below
+    Write-Host "Backup Copy exists, but no eligible chains were found before the cutoff" -ForegroundColor Green
+    Write-Host ""
+    Write-Host ""
+    Write-Host ""
+}
+
+# ✅ Display the ineligible (latest/current) chain afterward
+if ($target.LatestChainDetails) {
+    Write-Host "-----------------------------------------------------" -ForegroundColor Red
+    Write-Host "Ineligible restore points due to being current chain:" -ForegroundColor Red
+    Write-Host "-----------------------------------------------------" -ForegroundColor Red
+
+    $latestPointsTable = $target.LatestChainDetails.PointDetails |
+        Sort-Object RestorePointTime |
+        Select-Object ObjectName, RestorePointTime, RestorePointType, RestorePointId |
+        Format-Table -AutoSize | Out-String
+
+    Write-Host $latestPointsTable
+}
+
     Write-ReportLog ""
     Write-ReportLog "----- USER SELECTED CHAIN -----"
     Write-ReportLog "ObjectName:   $($target.ObjectName)"
     Write-ReportLog "BackupName:   $($target.BackupName)"
-    Write-ReportLog "ChainStart:   $($target.ChainStart)"
-    Write-ReportLog "ChainEnd:     $($target.ChainEnd)"
-    Write-ReportLog "Points:       $($target.TotalChainPoints)"
+    if ($hasEligible) {
+        Write-ReportLog "ChainStart:   $($target.ChainStart)"
+        Write-ReportLog "ChainEnd:     $($target.ChainEnd)"
+        Write-ReportLog "Points:       $($target.TotalChainPoints)"
+    } else {
+        Write-ReportLog "Eligible chain: NONE"
+    }
 
     # ---- Export options ----
     Write-Host "Options:" -ForegroundColor Cyan
-    Write-Host "  Enter a filename to export this chain's restore points to C:\Temp\<filename>.csv"
+    Write-Host "  Enter a filename to export the eligible and ineligible chains to C:\Temp\<filename>-Eligible.csv and <filename>-Ineligible.csv"
     Write-Host "  Enter 'C' to cancel and return to the chain list"
     Write-Host ""
 
@@ -530,22 +677,17 @@ while ($true) {
 
     # Sanitize filename
     $filename = $exportInput.Trim()
-
-    # Strip any directory prefix the user typed
     $filename = Split-Path -Path $filename -Leaf
 
-    # Remove invalid filename characters
     $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
     foreach ($ch in $invalidChars) {
         $filename = $filename.Replace($ch, '_')
     }
 
-    # Append .csv if not already there
-    if ($filename -notmatch '\.csv$') {
-        $filename = "$filename.csv"
+    # Strip .csv if user added it
+    if ($filename -match '\.csv$') {
+        $filename = $filename -replace '\.csv$', ''
     }
-
-    $exportPath = Join-Path 'C:\Temp' $filename
 
     # Make sure C:\Temp exists
     if (-not (Test-Path 'C:\Temp')) {
@@ -557,35 +699,79 @@ while ($true) {
         }
     }
 
-    # Build the export records
-    $exportRows = foreach ($p in ($target.PointDetails | Sort-Object RestorePointTime)) {
-        [pscustomobject]@{
-            ObjectName       = $target.ObjectName
-            CopyJobName      = $target.CopyJobName
-            SourceJobName    = $target.SourceJobName
-            BackupName       = $target.BackupName
-            BackupType       = $target.BackupType
-            Platform         = $target.Platform
-            Repository       = $target.Repository
-            ChainStart       = $target.ChainStart
-            ChainEnd         = $target.ChainEnd
-            ChainPointCount  = $target.TotalChainPoints
-            RestorePointTime = $p.RestorePointTime
-            RestorePointType = $p.RestorePointType
-            RestorePointId   = $p.RestorePointId
-            ObjectId         = $target.ObjectId
+    # ✅ Eligible CSV (only if there is one)
+    if ($hasEligible) {
+
+        $eligibleExportPath = Join-Path 'C:\Temp' "$filename-Eligible.csv"
+
+        $eligibleRows = foreach ($p in ($target.PointDetails | Sort-Object RestorePointTime)) {
+            [pscustomobject]@{
+                ObjectName       = $target.ObjectName
+                CopyJobName      = $target.CopyJobName
+                SourceJobName    = $target.SourceJobName
+                BackupName       = $target.BackupName
+                BackupType       = $target.BackupType
+                Platform         = $target.Platform
+                Repository       = $target.Repository
+                ChainStart       = $target.ChainStart
+                ChainEnd         = $target.ChainEnd
+                ChainPointCount  = $target.TotalChainPoints
+                RestorePointTime = $p.RestorePointTime
+                RestorePointType = $p.RestorePointType
+                RestorePointId   = $p.RestorePointId
+                ObjectId         = $target.ObjectId
+            }
         }
+
+        try {
+            $eligibleRows | Export-Csv -Path $eligibleExportPath -NoTypeInformation -Encoding UTF8
+            Write-Host ""
+            Write-Host "Exported $($eligibleRows.Count) eligible restore point(s) to:" -ForegroundColor Green
+            Write-Host "  $eligibleExportPath" -ForegroundColor Green
+            Write-ReportLog "Exported $($eligibleRows.Count) eligible points to $eligibleExportPath"
+        } catch {
+            Write-Warning "Failed to write eligible CSV: $_"
+            Write-ReportLog "FAILED to write eligible CSV: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Host ""
+        Write-Host "No eligible restore points to export — skipping eligible CSV." -ForegroundColor DarkGray
+        Write-ReportLog "Skipped eligible CSV (no eligible chain)"
     }
 
-    try {
-        $exportRows | Export-Csv -Path $exportPath -NoTypeInformation -Encoding UTF8
-        Write-Host ""
-        Write-Host "Exported $($exportRows.Count) restore point(s) to:" -ForegroundColor Green
-        Write-Host "  $exportPath" -ForegroundColor Green
-        Write-ReportLog "Exported $($exportRows.Count) points to $exportPath"
-    } catch {
-        Write-Warning "Failed to write CSV: $_"
-        Write-ReportLog "FAILED to write CSV: $($_.Exception.Message)"
+    # ✅ Ineligible CSV (latest chain)
+    if ($target.LatestChainDetails) {
+
+        $ineligibleExportPath = Join-Path 'C:\Temp' "$filename-Ineligible.csv"
+
+        $ineligibleRows = foreach ($p in ($target.LatestChainDetails.PointDetails | Sort-Object RestorePointTime)) {
+            [pscustomobject]@{
+                ObjectName       = $target.ObjectName
+                CopyJobName      = $target.CopyJobName
+                SourceJobName    = $target.SourceJobName
+                BackupName       = $target.BackupName
+                BackupType       = $target.BackupType
+                Platform         = $target.Platform
+                Repository       = $target.Repository
+                ChainStart       = $target.LatestChainDetails.ChainStart
+                ChainEnd         = $target.LatestChainDetails.ChainEnd
+                ChainPointCount  = $target.LatestChainDetails.TotalChainPoints
+                RestorePointTime = $p.RestorePointTime
+                RestorePointType = $p.RestorePointType
+                RestorePointId   = $p.RestorePointId
+                ObjectId         = $target.ObjectId
+            }
+        }
+
+        try {
+            $ineligibleRows | Export-Csv -Path $ineligibleExportPath -NoTypeInformation -Encoding UTF8
+            Write-Host "Exported $($ineligibleRows.Count) ineligible restore point(s) to:" -ForegroundColor Green
+            Write-Host "  $ineligibleExportPath" -ForegroundColor Green
+            Write-ReportLog "Exported $($ineligibleRows.Count) ineligible points to $ineligibleExportPath"
+        } catch {
+            Write-Warning "Failed to write ineligible CSV: $_"
+            Write-ReportLog "FAILED to write ineligible CSV: $($_.Exception.Message)"
+        }
     }
 }
 

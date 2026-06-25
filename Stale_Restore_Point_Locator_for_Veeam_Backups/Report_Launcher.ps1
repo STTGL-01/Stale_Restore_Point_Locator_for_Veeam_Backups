@@ -32,8 +32,8 @@ function Show-Logo {
     Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Maintainer: Zach Chamberlin" -ForegroundColor Cyan
-    Write-Host "  Last Updated: 2026-06-23" -ForegroundColor Cyan
-    Write-Host "  Version: 1.0.0" -ForegroundColor Cyan
+    Write-Host "  Last Updated: 2026-06-25" -ForegroundColor Cyan
+    Write-Host "  Version: 1.0.1" -ForegroundColor Cyan
     Write-Host ""
     Write-Host ""
     Write-Host "  This is an unofficial community tool and is not developed, supported, or endorsed by Veeam Software" -ForegroundColor DarkYellow
