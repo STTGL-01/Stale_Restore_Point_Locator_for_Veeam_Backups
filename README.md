@@ -133,7 +133,7 @@ Each workload script is modular and follows a consistent structure.
 If scripts are blocked after download:
 
 ```powershell
-Get-ChildItem 'C:\path\to\Restore_Point_Cleanup_for_Veeam_Backups' -Recurse -Filter *.ps1 | Unblock-File
+Get-ChildItem 'C:\path\to\Stale_Restore_Point_Locator_for_Veeam_Backups' -Recurse -Filter *.ps1 | Unblock-File
 ```
 
 ---
