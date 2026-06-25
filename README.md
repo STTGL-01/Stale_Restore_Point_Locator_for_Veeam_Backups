@@ -43,8 +43,8 @@ You connect once and define the cutoff once — all workloads reuse that session
 
 - **Toolkit Name:** Stale Restore-Point Report for Veeam Backups
 - **Maintainer:** Zach Chamberlin
-- **Version:** 1.0.0
-- **Last Updated:** 2026-06-23
+- **Version:** 1.0.1
+- **Last Updated:** 2026-06-25
 
 ### Notes
 
